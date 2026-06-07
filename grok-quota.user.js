@@ -1,134 +1,111 @@
 // ==UserScript==
-// @name         Grok Quota Display
+// @name         Grok Quota Monitor
 // @namespace    http://tampermonkey.net/
-// @version      1.0
-// @description  Show image/video generation quota and renewal time on Grok pages
+// @version      1.0.1
+// @description  Displays current quota details and renewal timer on Grok pages
 // @author       You
 // @match        https://grok.com/*
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=grok.com
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @run-at       document-end
 // ==/UserScript==
 
-(function () {
+(function() {
     'use strict';
 
-    const QUOTA_URL = 'https://grok.com/rest/media/imagine/quota_info';
+    let lastQuotaData = null;
 
-    async function fetchQuota() {
-        try {
-            const resp = await fetch(QUOTA_URL, {
-                method: 'POST',
-                credentials: 'include',
-                headers: {
-                    'accept': '*/*',
-                    'content-type': 'application/json',
-                },
-                body: '{}',
-            });
-            if (!resp.ok) return null;
-            return await resp.json();
-        } catch {
-            return null;
-        }
+    // Helper to extract credentials natively from active session cookies
+    function getCookie(name) {
+        const value = `; ${document.cookie}`;
+        const parts = value.split(`; ${name}=`);
+        if (parts.length === 2) return parts.pop().split(';').shift();
     }
 
-    function formatTimeRemaining(seconds) {
-        if (!seconds || seconds <= 0) return null;
-        const d = Math.floor(seconds / 86400);
-        const h = Math.floor((seconds % 86400) / 3600);
-        const m = Math.floor((seconds % 3600) / 60);
-        const parts = [];
-        if (d > 0) parts.push(`${d}d`);
-        if (h > 0) parts.push(`${h}h`);
-        parts.push(`${m}m`);
-        return parts.join(' ');
-    }
+    // Function to fetch quota data safely using site's own session state
+    function fetchQuota() {
+        // Grok requires an empty JSON object raw body for this endpoint
+        const payload = "{}";
 
-    function buildDisplay(data) {
-        const el = document.createElement('div');
-        el.id = 'grok-quota-display';
-        Object.assign(el.style, {
-            position: 'fixed',
-            top: '0',
-            left: '50%',
-            transform: 'translateX(-50%)',
-            zIndex: '99999',
-            padding: '6px 16px',
-            fontSize: '13px',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-            borderRadius: '0 0 12px 12px',
-            background: 'rgba(0,0,0,0.85)',
-            color: '#fff',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '16px',
-            backdropFilter: 'blur(8px)',
-            border: '1px solid rgba(255,255,255,0.08)',
-            borderTop: 'none',
-            pointerEvents: 'none',
-            userSelect: 'none',
-            lineHeight: '1.4',
-        });
-
-        if (!data || data.error) {
-            el.textContent = '⚠ Quota: unavailable';
-            return el;
-        }
-
-        const quotaGens = data.quotaGenerations ?? data.quota_generations;
-        const usedGens = data.numGenerationsThisPeriod ?? data.num_generations_this_period;
-        const quotaVids = data.quotaVideoGenerations ?? data.quota_video_generations;
-        const usedVids = data.numVideoGenerationsThisPeriod ?? data.num_video_generations_this_period;
-        const resetSecs = data.secondsUntilReset ?? data.seconds_until_reset;
-
-        const parts = [];
-
-        if (quotaGens != null) {
-            const pct = quotaGens > 0 ? Math.round((usedGens / quotaGens) * 100) : 0;
-            parts.push(`🖼 ${usedGens}/${quotaGens} (${pct}%)`);
-        }
-        if (quotaVids != null) {
-            const pct2 = quotaVids > 0 ? Math.round((usedVids / quotaVids) * 100) : 0;
-            parts.push(`🎬 ${usedVids}/${quotaVids} (${pct2}%)`);
-        }
-        const timeStr = formatTimeRemaining(resetSecs);
-        if (timeStr) parts.push(`⏰ reset ${timeStr}`);
-
-        el.textContent = parts.join(' · ');
-
-        return el;
-    }
-
-    let displayEl = null;
-
-    async function update() {
-        const data = await fetchQuota();
-        if (!displayEl || !document.body.contains(displayEl)) {
-            displayEl = buildDisplay(data);
-            document.body.prepend(displayEl);
-        } else {
-            const newEl = buildDisplay(data);
-            displayEl.replaceWith(newEl);
-            displayEl = newEl;
-        }
-    }
-
-    function waitForBody(cb) {
-        if (document.body) {
-            cb();
-        } else {
-            requestAnimationFrame(() => waitForBody(cb));
-        }
-    }
-
-    waitForBody(() => {
-        update();
-        setInterval(update, 30000);
-        const observer = new MutationObserver(() => {
-            if (!document.body.contains(displayEl)) {
-                update();
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: "https://grok.com/rest/media/imagine/quota_info",
+            headers: {
+                "accept": "*/*",
+                "content-type": "application/json",
+                "origin": "https://grok.com",
+                "referer": window.location.href
+            },
+            data: payload,
+            onload: function(response) {
+                try {
+                    const data = JSON.parse(response.responseText);
+                    if (data && data.video720p) {
+                        lastQuotaData = data.video720p;
+                        updateQuotaUI();
+                    }
+                } catch (e) {
+                    console.error("Failed to parse Grok quota response", e);
+                }
             }
         });
-        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    // Function to inject/update the UI component inside Grok's styling framework
+    function updateQuotaUI() {
+        if (!lastQuotaData) return;
+
+        // Target the video resolution/duration settings ribbon provided in your layout
+        const targetContainer = document.querySelector('.query-bar flex.flex-wrap.items-center.gap-1\\.5');
+        if (!targetContainer) return;
+
+        // Remove old instance if it exists
+        const existingBadge = document.getElementById('grok-quota-monitor-badge');
+        if (existingBadge) existingBadge.remove();
+
+        // Parse remaining queries and next available time
+        const remaining = lastQuotaData.remainingQueries !== undefined ? lastQuotaData.remainingQueries : "Available";
+        let timeString = "";
+
+        if (lastQuotaData.nextAvailableAt) {
+            const renewTime = new Date(lastQuotaData.nextAvailableAt);
+            const now = new Date();
+            const diffMs = renewTime - now;
+
+            if (diffMs > 0) {
+                const hours = Math.floor(diffMs / (1000 * 60 * 60));
+                const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+                timeString = `(Renews in ${hours}h ${minutes}m)`;
+            } else {
+                timeString = "(Renewing...)";
+            }
+        }
+
+        // Build a UI component utilizing Grok's design framework class rules
+        const quotaBadge = document.createElement('div');
+        quotaBadge.id = 'grok-quota-monitor-badge';
+        quotaBadge.className = 'inline-flex items-center gap-1.5 px-3 text-xs font-medium ring-1 ring-border dark:ring-transparent bg-surface-l2 text-secondary h-8 rounded-2xl select-none';
+        quotaBadge.style.color = remaining === 0 ? '#ef4444' : '#10b981'; // Red if empty, green if available
+        quotaBadge.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+            <span>720p Quota: <strong>${remaining}</strong> <span style="font-size:10px; opacity:0.8; color:gray; margin-left:4px;">${timeString}</span></span>
+        `;
+
+        targetContainer.appendChild(quotaBadge);
+    }
+
+    // Initialize checking routines
+    fetchQuota();
+    
+    // Periodically update countdowns and re-fetch status every 60 seconds
+    setInterval(updateQuotaUI, 15000); 
+    setInterval(fetchQuota, 60000);
+
+    // Watch for dynamic page updates or tab shifts to ensure UI stays attached
+    const observer = new MutationObserver(() => {
+        if (!document.getElementById('grok-quota-monitor-badge')) {
+            updateQuotaUI();
+        }
     });
+    observer.observe(document.body, { childList: true, subtree: true });
+
 })();
